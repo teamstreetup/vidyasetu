@@ -1,0 +1,13 @@
+node_modules/
+server/node_modules/
+client/node_modules/
+server/dist/
+client/dist/
+client/dev-dist/
+server/data/
+.vercel/
+.env
+.env.local
+*.log
+.DS_Store
+Thumbs.db
