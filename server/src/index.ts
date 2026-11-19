@@ -10,13 +10,17 @@ const PORT = Number(process.env.PORT || 4000);
 
 // Serve built client in standalone production mode if present
 const clientDist = path.resolve(__dirname, '../../client/dist');
-if (fs.existsSync(clientDist)) {
+if (!process.env.VERCEL && fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
   app.get('*', (_req, res) => {
     res.sendFile(path.join(clientDist, 'index.html'));
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`VidyaSetu API server running at http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`VidyaSetu API server running at http://localhost:${PORT}`);
+  });
+}
+
+export default app;
