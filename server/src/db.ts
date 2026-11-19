@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import initSqlJs, { type SqlDatabase } from 'sql.js/dist/sql-wasm-inline.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,18 +9,132 @@ const __dirname = path.dirname(__filename);
 
 const isVercel = Boolean(process.env.VERCEL);
 const dataDir = isVercel ? os.tmpdir() : path.resolve(__dirname, '../data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+
+function resolveDbPath(): string {
+  if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
+  return path.join(dataDir, 'vidyasetu.db');
 }
 
-const dbPath = process.env.SQLITE_DB_PATH || path.join(dataDir, 'vidyasetu.db');
-export const db = new DatabaseSync(dbPath);
+const dbPath = resolveDbPath();
 
-db.exec(isVercel ? 'PRAGMA journal_mode = MEMORY;' : 'PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+let rawDb: SqlDatabase | null = null;
+let initPromise: Promise<void> | null = null;
+let persistDisabled = false;
+let batching = false;
+
+function persistToDisk(): void {
+  if (!rawDb || persistDisabled || batching) return;
+  try {
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const bytes = rawDb.export();
+    fs.writeFileSync(dbPath, Buffer.from(bytes));
+  } catch {
+    // If filesystem is read-only, keep operating cleanly in memory
+    persistDisabled = true;
+  }
+}
+
+function normalizeParams(params: unknown[]): unknown[] {
+  return params.map((p) => (p === undefined ? null : p));
+}
+
+function getRawDb(): SqlDatabase {
+  if (!rawDb) {
+    throw new Error('Database not initialized. Call initDatabase() first.');
+  }
+  return rawDb;
+}
+
+export interface PreparedStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  run(...params: unknown[]): { changes: number };
+}
+
+export const db = {
+  exec(sql: string): void {
+    getRawDb().exec(sql);
+    persistToDisk();
+  },
+
+  prepare(sql: string): PreparedStatement {
+    return {
+      get(...params: unknown[]): Record<string, unknown> | undefined {
+        const stmt = getRawDb().prepare(sql);
+        try {
+          if (params.length > 0) stmt.bind(normalizeParams(params));
+          if (stmt.step()) {
+            return stmt.getAsObject();
+          }
+          return undefined;
+        } finally {
+          stmt.free();
+        }
+      },
+
+      all(...params: unknown[]): Array<Record<string, unknown>> {
+        const stmt = getRawDb().prepare(sql);
+        const rows: Array<Record<string, unknown>> = [];
+        try {
+          if (params.length > 0) stmt.bind(normalizeParams(params));
+          while (stmt.step()) {
+            rows.push(stmt.getAsObject());
+          }
+          return rows;
+        } finally {
+          stmt.free();
+        }
+      },
+
+      run(...params: unknown[]): { changes: number } {
+        const database = getRawDb();
+        database.run(sql, params.length > 0 ? normalizeParams(params) : undefined);
+        const changes = database.getRowsModified();
+        persistToDisk();
+        return { changes };
+      },
+    };
+  },
+};
+
+export async function initDatabase(onReady?: () => void): Promise<void> {
+  if (rawDb) return;
+  if (!initPromise) {
+    initPromise = (async () => {
+      const SQL = await initSqlJs();
+      let initialBytes: Uint8Array | undefined;
+      try {
+        if (fs.existsSync(dbPath)) {
+          const buf = fs.readFileSync(dbPath);
+          // Verify SQLite header ("SQLite format 3\0")
+          if (buf.length >= 16 && buf.subarray(0, 15).toString('utf8') === 'SQLite format 3') {
+            initialBytes = new Uint8Array(buf);
+          }
+        }
+      } catch {
+        initialBytes = undefined;
+      }
+
+      rawDb = initialBytes ? new SQL.Database(initialBytes) : new SQL.Database();
+      rawDb.exec('PRAGMA foreign_keys = ON;');
+      batching = true;
+      try {
+        initSchema();
+        if (onReady) onReady();
+      } finally {
+        batching = false;
+      }
+      persistToDisk();
+    })();
+  }
+  return initPromise;
+}
 
 export function initSchema(): void {
-  db.exec(`
+  getRawDb().exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
